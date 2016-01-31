@@ -1,0 +1,26 @@
+<?php
+// $Id$
+
+
+/**
+ * Implementation of hook_install()
+ */
+function twdocs_install() {
+  db_query("UPDATE {system} SET weight = 30 WHERE name='twdocs'");
+}
+
+/*
+function twdocs_update_6000(&$sandbox) {
+  drupal_install_schema('twdocs');
+}
+*/
+/*
+function twdocs_enable() {
+drupal_install_schema('twdocs');
+db_query("DELETE FROM {cache}");
+}*/
+/**
+ * Implementation of hook_uninstall()
+ */
+function twdocs_uninstall() {
+}

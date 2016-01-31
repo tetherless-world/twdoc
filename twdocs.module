@@ -1,0 +1,659 @@
+<?php
+// $Id$
+/**
+* @file
+* TW Documents Module.
+*/
+
+function twdocs_get_baseuri() {
+  return variable_get('twdocs_baseuri',"http://example.com/media/");
+}
+
+function twdocs_get_service() {
+  return variable_get('twdocs_service',"");
+}
+
+function twdocs_get_apikey() {
+  return variable_get('twdocs_apikey','');
+}
+
+function twdocs_get_apiurl() {
+  return twdocs_get_baseuri()."api.php";
+}
+
+/*******************************************************************************
+* Hook Functions (Drupal)
+******************************************************************************/
+
+/**
+* Display help and module information
+* @param path which path of the site we're displaying help
+* @param arg array that holds the current path as would be returned from arg() function
+* @return help text for the path
+*/
+function twdocs_help($path, $arg) {
+  
+  switch ($path) {
+  
+  case "admin/help/twdocs":
+    $output = '<p>'.  t("The TW Docs module handles the file upload and revision of all files in the media repository and helps manage the RDF triples associated with those media.") .'</p>';
+    break;
+  default:
+    $output = "";
+  }
+  return $output;
+}
+
+/**
+* Valid permissions for this module
+* @return array An array of valid permissions for the provenance module
+*/
+function twdocs_perm() {
+  return array('administer tw docs', 'upload documents');
+}
+
+/**
+* Menu for this module
+* @return array An array with this module's settings.
+*/
+function twdocs_menu() {
+  $items = array();
+  
+  $items['admin/settings/twdocs'] = array(
+    'title' => 'TW Document Settings',
+    'description' => 'Settings for the TW Document module',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('twdocs_admin_settings'),
+    'access arguments' => array('administer tw docs'),
+    'type' => MENU_NORMAL_ITEM
+    );
+
+  $items['twdocs/upload'] = array(
+    'title' => 'TW Document Upload',
+    'description' => 'Uploads a document to the TW media system',
+    'page callback' => 'twdocs_upload_file',
+    'access arguments' => array('upload documents'),
+    'type' => MENU_CALLBACK
+  );
+
+  $items['twdocs/form'] = array(
+    'title' => 'TW Document Upload',
+    'description' => 'Presents a document upload form',
+    'page callback' => 'twdocs_upload_form',
+    'access arguments' => array('upload documents'),
+    'type' => MENU_CALLBACK
+  );
+  
+  return $items;
+}
+
+function twdocs_field($name, $value, $eol, $boundary) {
+  $ans = '';
+  $ans .= "--$boundary$eol";
+  $ans .= "Content-Disposition: form-data; name=\"$name\"$eol$eol$value$eol";
+  return $ans;
+}
+
+function twdocs_filecontent($name, $fileName, $content, $eol, $boundary) {
+  $ans = '';
+  $ans .= "--$boundary$eol";
+  $ans .= "Content-Disposition: form-data; name=\"$name\"; filename=\"$fileName\"$eol";
+  $ans .= "Content-Type: application/octet-stream$eol";
+  $stats = fstat($content);
+  $ans .= "Content-Length: ".$stats["size"]."$eol$eol";
+  $ans .= fread($content,$stats["size"]);
+  $ans .= $eol;
+  return $ans;
+}
+
+function twdocs_upload_file() {
+  global $user;
+
+  $secret = twdocs_get_apikey();
+  $service = twdocs_get_service();
+  $request = "putFile";
+
+  $eol = "\r\n";
+  $boundary = md5(time());
+  
+  if($_FILES["content"]["error"]!=UPLOAD_ERR_OK) {
+    if(ob_get_level()) ob_end_clean();
+    echo '{"success": false, "error": "File upload failed. Error '.$_FILES["content"]["error"].'"}';
+    die;
+  }
+
+  $nonce = time();
+  $unhashed = $service.":".$nonce.":".$request.":".$secret;
+  $hashed = sha1($unhashed);
+
+  $data = "";
+  if(isset($_POST["title"]))
+    $data .= twdocs_field("title",$_POST["title"], $eol, $boundary);
+  $data .= twdocs_field("creator",$user->name, $eol, $boundary);
+  $data .= twdocs_field("service",$service, $eol, $boundary);
+  $data .= twdocs_field("request",$request, $eol, $boundary);
+  $data .= twdocs_field("file",$_POST["file"], $eol, $boundary);
+  $data .= twdocs_field("nonce",$nonce, $eol, $boundary);
+  $data .= twdocs_field("hash",$hashed, $eol, $boundary);
+
+  $fd = fopen($_FILES["content"]["tmp_name"],"rb");
+  $data .= twdocs_filecontent("content",$_POST["file"],$fd, $eol, $boundary);
+  fclose($fd);
+  $data .= "--$boundary--$eol$eol";
+
+  $params = array('http' => array('method' => 'POST',
+				  'header' => 'Content-Type: multipart/form-data; boundary='.$boundary.$eol,
+				  'content' => $data));
+  $ctx = stream_context_create($params);
+  $response = file_get_contents(twdocs_get_apiurl(),false,$ctx);
+  if($response===FALSE) {
+    if(ob_get_level()) ob_end_clean();
+    echo '{"success": false, "error": "Media server failed to respond."}';
+    die;
+  }
+
+  $res2 = json_decode($response);
+  if($res2 === NULL) {
+    if(ob_get_level()) ob_end_clean();
+    echo '{"success": false, "error": "Media server return empty JSON response."}';
+    die;
+  }
+
+  $form = ($_SERVER["HTTPS"] ? "https://" : "http://").$_SERVER["HTTP_HOST"].
+    base_path()."twdocs/form";
+  if($_SERVER["HTTP_REFERER"]==$form) {
+    if(ob_get_level()) ob_end_clean();
+    echo $response;
+  }
+  else {
+    if(!$res2->success)
+      drupal_set_message($response,"error");
+    header("Location: ".$_SERVER["HTTP_REFERER"]);
+  }
+  die;
+}
+
+function twdocs_upload_form() {
+  $action = base_path()."twdocs/upload";
+  $path = base_path().drupal_get_path("module","twdocs");
+  if(ob_get_level()) ob_end_clean();
+?>
+<html>
+<head>
+<link rel="stylesheet" type="text/css" href="<?=$path?>/css/redmond/jquery-ui-1.8.9.custom.css"></link>
+<style>
+fieldset {
+  border: 0;
+  padding: 0;
+}
+</style>
+<script src="<?=$path?>/js/jquery-1.4.4.min.js" type="text/javascript"></script>
+<script src="<?=$path?>/upload.js" type="text/javascript"></script>
+</head>
+<body>
+<form name="twdocsmedia" method="POST" action="<?=$action?>" enctype="multipart/form-data">
+  <fieldset>
+<!--
+    <label for="title">Title:</label>
+    <input type="text" name="title" id="title" class="text ui-widget-content ui-corner-all"/>
+    <br/>
+-->
+    <label for="content">Document:</label>
+    <input type="file" name="content" class="text ui-widget-content ui-corner-all"/>
+    <br/>
+    <label for="file">Remote Name:</label>
+    <input type="text" name="file" id="file" class="text ui-widget-content ui-corner-all"/>
+  </fieldset>
+</form>
+</body>
+</html>
+<?php
+  die;
+}
+
+function twdocs_nodeapi(&$node,$op,$a3=NULL,$a4=NULL){
+  switch($op) {
+  case 'presave':
+  case 'delete':
+  case 'update':
+  case 'insert':
+    break;
+  case 'view':
+    $node->content["body"]["#value"] = twdocs_process($node->content["body"]["#value"], $node);
+    break;
+  case 'save':
+    break;
+  }
+}
+
+function twdocs_get_iframe_form() {
+  global $user;
+  $res = "";
+  $res .= '<div id="twdocs-upload" title="Upload a file" path="'.base_path().'twdocs/form">';
+  $res .= '<iframe id="twdocs-upload-iframe" frameborder="0" width="300" height="90" src="'.
+    base_path().'twdocs/form"></iframe>';
+  $res .= "</div>";
+  return $res;
+}
+
+function twdocs_get_upload_form() {
+  global $user;
+  $res = "";
+  $res .= '<div id="twdocs-form" title="Upload a file">';
+  $res .= '<form name="twdocsmedia" method="POST" action="';
+  $res .= base_path().'twdocs/upload';
+  $res .= '" enctype="multipart/form-data">';
+  $res .= '<fieldset>';
+  $res .= '<label for="title">Title:</label>';
+  $res .= '<input type="text" name="title" class="text ui-widget-content ui-corner-all"/><br/>';
+  $res .= '<label for="content">Document:</label>';
+  $res .= '<input type="file" name="content" class="text ui-widget-content ui-corner-all"/>';
+  $res .= '<input id="twdocs-file" type="hidden" name="file" value=""/>';
+  $res .= '</fieldset>';
+  $res .= '</form>';
+  $res .= '</div>';
+  return $res;
+}
+
+function twdocs_get_upload_revision_form() {
+  global $user;
+  $res = "";
+  $res .= '<div id="twdocs-revision-form" title="Upload a revision">';
+  $res .= '<form name="twdocsrevision" method="POST" action="" enctype="multipart/form-data">';
+  $res .= '<fieldset>';
+  $res .= '<label for="content">New Document:</label>';
+  $res .= '<input type="file" name="content" class="text ui-widget-content ui-corner-all"/>';
+  $res .= '<input type="hidden" name="file" value="" />';
+  $res .= '<input type="hidden" name="url" value="" />';
+  $res .= '<input type="hidden" name="method" value="revision" />';
+  $res .= '</fieldset>';
+  $res .= '</form>';
+  $res .= '</div>';
+  return $res;
+}
+
+/*
+global $twdocs_eol,$twdocs_mime_boundary;
+$twdocs_eol = "\r\n";
+$twdocs_mime_boundary = md5(time());
+
+function twdocs_field($name, $value) {
+  global $twdocs_eol, $twdocs_mime_boundary;
+  $ans = '';
+  $ans .= "--$twdocs_mime_boundary$twdocs_eol";
+  $ans .= "Content-Disposition: form-data; name=\"$name\"$twdocs_eol$twdocs_eol$value$twdocs_eol";
+  return $ans;
+}
+
+function twdocs_filecontent($name, $fileName, $type, $content) {
+  global $twdocs_eol, $twdocs_mime_boundary;
+  $ans = '';
+  $ans .= "--$twdocs_mime_boundary$twdocs_eol";
+  $ans .= "Content-Disposition: form-data; name=\"$name\"; filename=\"$fileName\"$twdocs_eol";
+  $ans .= "Content-Type: $type$twdocs_eol$twdocs_eol";
+  $stats = fstat($content);
+  $ans .= fread($content,$stats["size"]);
+  $ans .= $twdocs_eol;
+  return $ans;
+}
+*/
+
+function twdocs_submit_revision(&$node) {
+  global $user;
+  if(!isset($_POST["url"]) || $_POST["url"]=="") {
+    drupal_set_message("The URL attribute was empty. The page will not be updated.","warning");
+    return FALSE;
+  }
+  $eol = "\r\n";
+  $boundary = md5(time());
+
+  $secret = twdocs_get_apikey();
+  $service = twdocs_get_service();
+  $request = "putFile";
+  
+  $nonce = time();
+  $unhashed = $service.":".$nonce.":".$request.":".$secret;
+  $hashed = sha1($unhashed);
+
+  $data = "";
+  $titles = twdocs_get_property($_POST["url"],"http://purl.org/dc/terms/title");
+  $data .= twdocs_field("title",$titles[0], $eol, $boundary);
+  $data .= twdocs_field("creator",$user->name, $eol, $boundary);
+  $data .= twdocs_field("service",$service, $eol, $boundary);
+  $data .= twdocs_field("request",$request, $eol, $boundary);
+  $data .= twdocs_field("file",$_POST["file"], $eol, $boundary);
+  $data .= twdocs_field("nonce",$nonce, $eol, $boundary);
+  $data .= twdocs_field("hash",$hashed, $eol, $boundary);
+
+  $fd = fopen($_FILES["content"]["tmp_name"],"rb");
+  $data .= twdocs_filecontent("content",$_POST["file"],$fd,$eol,$boundary);
+  fclose($fd);
+
+  $data .= "--$boundary--$eol$eol";
+  $params = array("http" => array("method" => "POST",
+				  "header" => "Content-Type: multipart/form-data; boundary=$boundary$eol",
+				  "content" => $data));
+  $ctx = stream_context_create($params);
+  $response = file_get_contents(twdocs_get_apiurl(),false,$ctx);
+  if($response===FALSE) {
+    drupal_set_message("Upload to media server failed.","error");
+    return FALSE;
+  }
+  $result = @json_decode($response);
+  if($result->success===FALSE) {
+    drupal_set_message($result->error,"error");
+    return FALSE;
+  }
+  $node2 = node_load($node->nid);
+  $str = $node2->body;
+  $str = preg_replace("|".$_POST["url"]."|",$result->persist,$str);
+  $node2->body = $str;
+  $node2->uid = $user->uid;
+  $node2->name = $user->name;
+  node_validate($node2);
+  if($errors = form_get_errors()) {
+    foreach($errors as $i => $val) {
+      drupal_set_message($val, "error");
+    }
+  }
+  else {
+    unset($node2->teaser);
+    $edit =node_submit($node2);
+    node_save($edit);
+    $node2 = node_load(array("nid"=>$edit->nid),NULL,TRUE);
+  }
+  return TRUE;
+}
+
+function twdocs_process($content, &$node) {
+  global $user;
+  //$user = user_load($user);
+  if(isset($_POST["file"])&&isset($_FILES["content"])) {
+    if($_FILES["content"]["error"]==0) {
+      if(twdocs_submit_revision($node)) {
+	header("Location: ".($_SERVER["HTTPS"] ? "https://" : "http://").
+	       $_SERVER["HTTP_HOST"].$_SERVER["REQUEST_URI"]);
+	die;
+      }
+    }
+    else {
+      drupal_set_message("File upload was unsuccessful.","error");
+    }
+  }
+  drupal_add_js(drupal_get_path('module','twdocs').'/js/jquery-1.4.4.min.js','core');
+  drupal_add_js(drupal_get_path('module','twdocs').'/js/jquery-ui-1.8.9.custom.min.js');
+  if(node_access("update",$node)) {
+    drupal_add_js(drupal_get_path('module','twdocs').'/upload.js');
+    drupal_add_js(drupal_get_path('module','twdocs').'/sha1.js');
+    drupal_add_js(drupal_get_path('module','twdocs').'/json.js');
+  }
+  drupal_add_css(drupal_get_path('module','twdocs').'/css/redmond/jquery-ui-1.8.9.custom.css');
+  $queries = array(); // Caching for queries w/ same parameters
+  $newContent = "";
+  // Match script tag
+  $start = 0;
+  $matches = array();
+  if(0<preg_match_all("/<document(([^\/>]*(\/[^>])?)*)(\/>|>(([^<]*(<[^\/])?)*)<\/document>)/",$content,$matches,PREG_OFFSET_CAPTURE)) {
+    $params = twdocs_parse_params($matches);
+    $text = print_r($params,true);
+    //drupal_set_message($text,'status');
+    foreach($params as $desc) {
+      $newContent .= substr($content,$start,$desc["startChar"]-$start);
+      $text = twdocs_place_reference($desc, $node);
+      //drupal_set_message(htmlspecialchars($text),'status');
+      $newContent .= $text;
+      $start = $desc["endChar"];
+    }
+    $content = $newContent . substr($content,$start);
+    if(node_access("update",$node)) {
+      $content .= twdocs_get_upload_form();
+    }
+  }
+  $start = 0;
+  $newContent = "";
+  $matches = array();
+  if(0<preg_match_all("/<upload(([^\/>]*(\/[^>])?)*)(\/>|>(([^<]*(<[^\/])?)*)<\/upload>)/",$content,$matches,PREG_OFFSET_CAPTURE)) {
+    $params = twdocs_parse_params($matches);
+    $text = print_r($params,true);
+    //drupal_set_message($text,'status');
+    foreach($params as $desc) {
+      $newContent .= substr($content,$start,$desc["startChar"]-$start);
+      if(isset($desc["revision"])&&$desc["revision"]=="true")
+	$text = twdocs_place_upload_revision($desc, $node);
+      else
+	$text = twdocs_place_upload($desc, $node);
+      //drupal_set_message(htmlspecialchars($text),'status');
+      $newContent .= $text;
+      $start = $desc["endChar"];
+    }
+    $content = $newContent . substr($content,$start);
+    if(node_access("update",$node)) {
+      $content .= twdocs_get_iframe_form();
+      $content .= twdocs_get_upload_revision_form();
+    }
+  }
+  return $content;
+}
+
+function twdocs_parse_params($matches) {
+  $params = array();
+  //drupal_set_message(print_r($matches,true),'status');
+
+  $tagText = $matches[0];
+  $paramText = $matches[1];
+  $queryText = $matches[6];
+
+  for($i=0;$i<count($tagText);$i++) {
+    $text = $tagText[$i];
+    $desc = array();
+    $desc["startChar"] = $text[1];
+    $desc["length"] = strlen($text[0]);
+    $desc["endChar"] = $desc["startChar"] + $desc["length"];
+    $desc["href"] = null;
+    $desc["version"] = "latest";
+    $desc["alt"] = null;
+    $desc["mode"] = "link";
+    $desc["id"] = null;
+    $pairs = array();
+    $count = preg_match_all("/([[:alpha:]]*)=\"([^\"]*)\"/",$paramText[$i][0],$pairs);
+    for($j=0;$j<$count;$j++) {
+      switch($pairs[1][$j]) {
+      case "style":
+	$desc["style"] = $pairs[2][$j];
+	break;
+      case "href":
+        $desc["href"] = $pairs[2][$j];
+        break;
+      case "version":
+        $desc["version"] = $pairs[2][$j];
+        break;
+      case "alt":
+        $desc["alt"] = $pairs[2][$j];
+        break;
+      case "mode":
+        $desc["mode"] = $pairs[2][$j];
+        break;
+      case "id":
+	$desc["id"] = $pairs[2][$j];
+	break;
+      case "revision":
+	$desc["revision"] = $pairs[2][$j];
+	break;
+      }
+    }
+    if($desc["alt"]==null) {
+      // Short term: untitled
+      // Long term: SPARQL for dc:title and display
+      $desc["alt"] = $desc["href"];
+    }
+    $params[] = $desc;
+  }
+
+  return $params;
+}
+
+function twdocs_api_call($request, $args) {
+  $nonce = time();
+  $service = twdocs_get_service();
+  $key = twdocs_get_apikey();
+  $unhashed = "$service:$nonce:$request:$key";
+  $hashed = sha1($unhashed);
+  $msg = "service=$service&nonce=$nonce&request=$request&hash=$hashed";
+  foreach($args as $param => $value) {
+    $msg .= "&$param=".urlencode($value);
+  }
+  $params = array('http' => array('method' => 'POST',
+				  'content' => $msg));
+  $ctx = stream_context_create($params);
+  $ans = @file_get_contents(twdocs_get_apiurl(),false,$ctx);
+  $answer = @json_decode($ans);
+  return $answer;
+}
+
+function twdocs_file_exists($href) {
+  $result = twdocs_api_call("checkInUse",array("file"=>$href));
+  if($result===null || $result->response==FALSE) return FALSE;
+  return TRUE;
+}
+
+function twdocs_get_property($uri, $prop) {
+  $result = twdocs_api_call("getProperty",array("subject"=>$uri,"property"=>$prop));
+  if($result===null || count($result->response)==0) {
+    return null;
+  }
+  return $result->response;
+}
+
+function twdocs_place_upload($params, &$node) {
+  return '<input type="button" id="'.$params["id"].'" onclick="showiFrame(\'#'.$params["id"].'\');" value="Upload File"/>';
+}
+
+function twdocs_place_upload_revision($params, &$node) {
+  if(node_access("update",$node)) {
+    $parts = explode("/",$params["href"]);
+    return '<input type="button" id="'.$params["id"].'" onclick="showRevisionUpload(\'#'.$params["id"].'\',\''.$parts[count($parts)-1].'\',\''.$params["href"].'\');" value="Upload New Revision"/>';
+  }
+  else return "";
+}
+
+function twdocs_place_reference($params, &$node) {
+  global $user;
+  if(!twdocs_file_exists($params["href"])) {
+    $class = "class=\"missing\"";
+    $params["mode"] = "link";
+  }
+  else {
+    $class = "";
+    $base = twdocs_get_baseuri() ;
+    $uri = twdocs_get_baseuri().$params["version"]."/".$params["href"];
+    $page = twdocs_get_property($uri,"http://xmlns.com/foaf/0.1/page");
+    if($page != null && count($page)>0) {
+      $page = $page[0];
+    }
+    else {
+      unset($page);
+      $arr = explode( "/", $uri ) ;
+      if( count( $arr ) > 0 )
+      { 
+        $oldName = $arr[count( $arr ) - 1] ;
+        $fulldir = "/var/www/html/tw.rpi.edu/media/files" ;
+        $fullpath = $fulldir."/latest/".$oldName ;
+        if( is_link( $fullpath ) )
+        { 
+          $oldPath = readlink( $fullpath ) ;
+          $oldPath = explode( "files/", $oldPath ) ;
+          $oldPath = $oldPath[count($oldPath)-1];
+          $actualuri = "$base$oldPath" ;
+          $page = "http://tw.rpi.edu/web/doc/Document?uri=$actualuri" ;
+        }
+      }
+    }
+  }
+  if(isset($params["id"])) {
+    $id = 'id="'.$params["id"].'" ';
+  }
+  else {
+    $id = "";
+  }
+  switch($params["mode"]) {
+  case "link":
+    $value = "<a $id$class ".(isset($page)?"href=\"":"");
+    break;
+  case "img":
+    $value = "<a href=\"$uri\"><img $id$class src=\"$uri\"";
+    if(isset($params["style"])) {
+      $value .= ' style="'.$params["style"].'" ';
+    }
+    unset($page);
+    break;
+  case "embed":
+    $value = "<object $id$class ".(isset($page)?"data=\"":"");
+    break;
+  }
+  $value .= (isset($page) ? $page."\" " : "");
+  if($params["mode"]=="embed") {
+    $value .= "/>";
+  }
+  else {
+    $value .= "alt=\"".$params["alt"]."\"";
+    if($params["mode"]=="img")
+      $value .= " title=\"".$params["alt"]."\" /></a>";
+    else {
+      $value .= ">".$params["alt"]."</a>";
+      if($class=="") {
+	$uri = preg_replace('/\s/','_',$uri);
+	$value .= " [<a href=\"$uri\">Download</a>]";
+      }
+      else if(node_access("update",$node)) {
+	$value .= " [<a onclick=\"uploadForm('".$params["href"]."');\">Upload</a>]";
+      }
+    }
+  }
+  return $value;
+}
+
+/**
+* TW Docs Configure
+* @return array An array of form data.
+*/
+function twdocs_admin_settings() {
+  $form = array();
+
+  $form['settings'] = array(
+    '#type' => 'fieldset',
+    '#title' => t('Settings'),
+    '#collapsible' => FALSE,
+    '#collapsed' => FALSE);
+
+  $form['settings']['twdocs_baseuri'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Base URI for Document Store'),
+    '#default_value' => twdocs_get_baseuri(),
+    '#maxlength' => 2048,
+    '#required' => TRUE,
+    '#description' => t('')
+    );
+
+  $form['settings']['twdocs_service'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Service ID'),
+    '#default_value' => twdocs_get_service(),
+    '#maxlength' => 255,
+    '#required' => TRUE,
+    '#description' => t('The service identifier the module should use when talking to the media manager.')
+    );
+  
+  $form['settings']['twdocs_apikey'] = array(
+    '#type' => 'textfield',
+    '#title' => t('API Key'),
+    '#default_value' => twdocs_get_apikey(),
+    '#maxlength' => 40,
+    '#required' => TRUE,
+    '#description' => t('The API key needed for hashing the request for authentication purposes.')
+    );
+
+  return array_merge_recursive(system_settings_form($form), array('#theme' => 'twdocs_admin_settings', 'buttons' => array('#weight' => 99)));
+}
+
+function twdocs_admin_settings_validate($form, &$form_state) {
+}

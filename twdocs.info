@@ -1,0 +1,11 @@
+; $Id$
+name = TW Documents
+description = Handles the management of documents with the TW Media Service.
+dependencies[] = content
+core = 6.x
+
+package = "RDF"
+
+version = "6.x-1.0-dev"
+
+
