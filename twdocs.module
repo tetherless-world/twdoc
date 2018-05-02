@@ -346,7 +346,7 @@ function twdocs_submit_revision(&$node) {
   }
   $node2 = node_load($node->nid);
   $str = $node2->body;
-  $str = preg_replace("|".$_POST["url"]."|",$result->persist,$str);
+  //$str = preg_replace("|".$_POST["url"]."|",$result->persist,$str);
   $node2->body = $str;
   $node2->uid = $user->uid;
   $node2->name = $user->name;
@@ -458,6 +458,9 @@ function twdocs_parse_params($matches) {
     $count = preg_match_all("/([[:alpha:]]*)=\"([^\"]*)\"/",$paramText[$i][0],$pairs);
     for($j=0;$j<$count;$j++) {
       switch($pairs[1][$j]) {
+      case "usemap":
+	$desc["usemap"] = $pairs[2][$j];
+	break;
       case "style":
 	$desc["style"] = $pairs[2][$j];
 	break;
@@ -558,13 +561,15 @@ function twdocs_place_reference($params, &$node) {
         $oldName = $arr[count( $arr ) - 1] ;
         $fulldir = "/var/www/html/tw.rpi.edu/media/files" ;
         $fullpath = $fulldir."/latest/".$oldName ;
+	$actualuri = $base."latest/".$oldName ;
+        $page = "http://tw.rpi.edu/web/doc/Document?uri=$actualuri" ;
         if( is_link( $fullpath ) )
         { 
           $oldPath = readlink( $fullpath ) ;
           $oldPath = explode( "files/", $oldPath ) ;
           $oldPath = $oldPath[count($oldPath)-1];
           $actualuri = "$base$oldPath" ;
-          $page = "http://tw.rpi.edu/web/doc/Document?uri=$actualuri" ;
+          //$page = "http://tw.rpi.edu/web/doc/Document?uri=$actualuri" ;
         }
       }
     }
@@ -584,10 +589,13 @@ function twdocs_place_reference($params, &$node) {
     if(isset($params["style"])) {
       $value .= ' style="'.$params["style"].'" ';
     }
+    if(isset($params["usemap"])) {
+      $value .= ' usemap="'.$params["usemap"].'" ';
+    }
     unset($page);
     break;
   case "embed":
-    $value = "<object $id$class ".(isset($page)?"data=\"":"");
+    $value = "<object $id$class ".(isset($actualuri)?"data=\"":"");
     break;
   }
   $value .= (isset($page) ? $page."\" " : "");
@@ -595,7 +603,10 @@ function twdocs_place_reference($params, &$node) {
     $value .= "/>";
   }
   else {
-    $value .= "alt=\"".$params["alt"]."\"";
+    if( !isset($params["usemap"]) )
+    {
+	$value .= "alt=\"".$params["alt"]."\"";
+    }
     if($params["mode"]=="img")
       $value .= " title=\"".$params["alt"]."\" /></a>";
     else {
